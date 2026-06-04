@@ -1,0 +1,76 @@
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body, #root {
+  background: #f5f4f2;
+}
+
+body {
+  font-family: "Libre Franklin", sans-serif;
+  font-weight: 500;
+  font-style: normal;
+}
+
+.btn-primary {
+  transition: background 0.15s ease, transform 0.1s ease;
+}
+.btn-primary:not(:disabled):hover {
+  background: #2a2a2a !important;
+  transform: scale(1.02);
+}
+
+.btn-ghost {
+  transition: background 0.15s ease, transform 0.1s ease;
+}
+.btn-ghost:hover {
+  background: #ebe9e6 !important;
+  transform: scale(1.02);
+}
+
+.btn-text {
+  transition: color 0.15s ease;
+}
+.btn-text:hover {
+  color: #111111 !important;
+}
+
+.card-select {
+  transition: transform 0.15s ease, filter 0.15s ease;
+}
+.card-select:hover {
+  transform: scale(1.01);
+  filter: brightness(0.96);
+}
+
+.swatch {
+  transition: transform 0.12s ease;
+}
+.swatch:hover {
+  transform: scale(1.15);
+}
+
+.preset-thumb {
+  transition: transform 0.12s ease, opacity 0.12s ease;
+}
+.preset-thumb:hover {
+  transform: scale(1.06);
+  opacity: 0.8;
+}
+
+.zone-pill {
+  transition: background 0.15s ease, color 0.15s ease, transform 0.1s ease;
+}
+.zone-pill:hover {
+  transform: scale(1.03);
+  opacity: 0.85;
+}
+.progress-step {
+  transition: opacity 0.15s ease, transform 0.1s ease;
+}
+.progress-step:hover {
+  opacity: 0.7;
+  transform: scale(1.05);
+}
