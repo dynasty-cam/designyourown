@@ -510,7 +510,7 @@ export default function App() {
           <Eyebrow>Step 5</Eyebrow>
           <Heading>Your cart</Heading>
         </div>
-        <button className="btn-ghost" onClick={() => setStep(3)} style={btnGhost}>+ Add design</button>
+        <button className="btn-ghost" onClick={() => { setGarment(null); setStep(2); }} style={btnGhost}>+ Add design</button>
       </div>
       <BodyText>Review your saved designs before requesting a quote.</BodyText>
       {cart.length === 0 ? (
