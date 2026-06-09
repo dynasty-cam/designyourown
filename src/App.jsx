@@ -1,5 +1,6 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import * as THREE from "three";
+import { jsPDF } from "jspdf";
 
 const ORANGE = "#e95428";
 const BG     = "#f5f4f2";
@@ -77,7 +78,7 @@ const ZONES = [
 const STEPS = ["Sport", "Base colour", "Garment", "Design", "Cart"];
 
 // ── Three.js ball ──────────────────────────────────────────────
-function ThreeCanvas({ zones }) {
+function ThreeCanvas({ zones, canvasRef }) {
   const mountRef = useRef();
   const stateRef = useRef({});
 
@@ -129,6 +130,7 @@ function ThreeCanvas({ zones }) {
     const mesh = new THREE.Mesh(geo, mat);
     scene.add(mesh);
     stateRef.current = { renderer, scene, cam, mesh, mat, cv, ctx, tex, paint };
+    if (canvasRef) canvasRef.current = renderer.domElement;
     const onWheel = e => {
       e.preventDefault();
       cam.position.z = Math.max(1.5, Math.min(8, cam.position.z + e.deltaY * 0.005));
@@ -314,11 +316,143 @@ export default function App() {
   const [logos, setLogos]       = useState({ chest: null, back: null });
   const [cart, setCart]         = useState([]);
   const [form, setForm]         = useState({});
-  const chestRef = useRef(), backRef = useRef();
+  const chestRef = useRef(), backRef = useRef(), threeCanvasRef = useRef();
 
   const setColor       = hex => setZones(z => ({ ...z, [activeZone]: hex }));
-  const addToCart      = () => setCart(c => [...c, { id: Date.now(), sport: SPORTS.find(s => s.id === sport)?.label, garment, zones: { ...zones } }]);
+  const addToCart      = () => setCart(c => [...c, { id: Date.now(), sport: SPORTS.find(s => s.id === sport)?.label, garment, zones: { ...zones }, preset: activePreset }]);
   const removeFromCart = id => setCart(c => c.filter(i => i.id !== id));
+
+  const generatePDF = useCallback((cartItems, formData) => {
+    const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+    const W = 210, margin = 20;
+    let y = 20;
+
+    // Header bar
+    doc.setFillColor(17, 17, 17);
+    doc.rect(0, 0, W, 20, "F");
+    doc.setTextColor(255, 255, 255);
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(11);
+    doc.text("DYNASTY SPORT", margin, 13);
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(9);
+    doc.text("Design Your Own — Quote Summary", W - margin, 13, { align: "right" });
+
+    y = 34;
+
+    // Customer details
+    doc.setTextColor(17, 17, 17);
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(13);
+    doc.text("Customer Details", margin, y); y += 7;
+    doc.setDrawColor(233, 84, 40);
+    doc.setLineWidth(0.5);
+    doc.line(margin, y, W - margin, y); y += 6;
+
+    const details = [
+      ["Name",     formData.name],
+      ["Email",    formData.email],
+      ["Phone",    formData.phone || "—"],
+      ["Team",     formData.team || "—"],
+      ["Address",  [formData.address, formData.city, formData.state, formData.postcode, formData.country].filter(Boolean).join(", ")],
+      ["Quantity", formData.qty || "—"],
+    ];
+    doc.setFontSize(9);
+    details.forEach(([label, value]) => {
+      doc.setFont("helvetica", "bold");
+      doc.setTextColor(100, 100, 100);
+      doc.text(label.toUpperCase(), margin, y);
+      doc.setFont("helvetica", "normal");
+      doc.setTextColor(17, 17, 17);
+      doc.text(value || "—", margin + 35, y);
+      y += 6;
+    });
+
+    if (formData.notes) {
+      doc.setFont("helvetica", "bold");
+      doc.setTextColor(100, 100, 100);
+      doc.text("NOTES", margin, y);
+      doc.setFont("helvetica", "normal");
+      doc.setTextColor(17, 17, 17);
+      const noteLines = doc.splitTextToSize(formData.notes, W - margin - 55);
+      doc.text(noteLines, margin + 35, y);
+      y += noteLines.length * 6;
+    }
+
+    y += 8;
+
+    // 3D preview screenshot
+    if (threeCanvasRef.current) {
+      try {
+        const imgData = threeCanvasRef.current.toDataURL("image/png");
+        const previewW = 80, previewH = 74;
+        const previewX = W - margin - previewW;
+        const previewY = y;
+        doc.addImage(imgData, "PNG", previewX, previewY, previewW, previewH);
+      } catch(e) {
+        console.warn("Could not capture 3D preview:", e);
+      }
+    }
+
+    // Designs
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(13);
+    doc.setTextColor(17, 17, 17);
+    doc.text("Your Designs", margin, y); y += 7;
+    doc.setDrawColor(233, 84, 40);
+    doc.setLineWidth(0.5);
+    doc.line(margin, y, W - margin, y); y += 8;
+
+    cartItems.forEach((item, idx) => {
+      // Design heading
+      doc.setFillColor(245, 244, 242);
+      doc.rect(margin, y - 4, W - margin * 2, 8, "F");
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(10);
+      doc.setTextColor(17, 17, 17);
+      doc.text(`Design ${idx + 1} — ${item.garment || "Jersey"} · ${item.sport || ""}`, margin + 2, y + 1);
+      y += 10;
+
+      // Colour zones
+      doc.setFontSize(8);
+      const zoneEntries = Object.entries(item.zones);
+      const swatchSize = 5;
+      const colPerRow = 3;
+      zoneEntries.forEach(([zone, hex], zi) => {
+        const col = zi % colPerRow;
+        const row = Math.floor(zi / colPerRow);
+        const sx = margin + col * 58;
+        const sy = y + row * 10;
+        // Swatch
+        const r = parseInt(hex.slice(1,3),16);
+        const g = parseInt(hex.slice(3,5),16);
+        const b = parseInt(hex.slice(5,7),16);
+        doc.setFillColor(r, g, b);
+        doc.setDrawColor(200, 200, 200);
+        doc.rect(sx, sy - 3, swatchSize, swatchSize, "FD");
+        // Label
+        doc.setFont("helvetica", "bold");
+        doc.setTextColor(100, 100, 100);
+        doc.text(zone.replace(/([A-Z])/g, ' $1').toUpperCase(), sx + 7, sy + 1);
+        doc.setFont("helvetica", "normal");
+        doc.setTextColor(17, 17, 17);
+        doc.text(hex.toUpperCase(), sx + 7, sy + 5);
+      });
+      y += Math.ceil(zoneEntries.length / colPerRow) * 10 + 6;
+
+      if (y > 260) { doc.addPage(); y = 20; }
+    });
+
+    // Footer
+    doc.setFillColor(17, 17, 17);
+    doc.rect(0, 282, W, 15, "F");
+    doc.setTextColor(255, 255, 255);
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(8);
+    doc.text("dynastysport.co.nz  ·  marketing@dynastysport.co.nz", W / 2, 291, { align: "center" });
+
+    doc.save(`DynastySport_DYO_${formData.name?.replace(/\s/g,"_") || "Quote"}.pdf`);
+  }, []);
 
   // ── Landing ──
   if (page === "landing") return (
@@ -430,7 +564,7 @@ export default function App() {
 
         {/* Left — 3D viewer */}
         <div>
-          <ThreeCanvas zones={zones} />
+          <ThreeCanvas zones={zones} canvasRef={threeCanvasRef} />
         </div>
 
         {/* Right — controls */}
@@ -548,7 +682,12 @@ export default function App() {
           <div style={{ width: 48, height: 48, borderRadius: "50%", background: INK, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 1.25rem", fontSize: 20, color: WHITE }}>✓</div>
           <Heading size={26}>Quote request sent.</Heading>
           <p style={{ ...T.body, fontSize: 14, color: MUTED, lineHeight: 1.8, margin: "0.5rem 0 2rem" }}>The Dynasty Sport team will review your designs and be in touch within 1–2 business days.</p>
-          <button className="btn-ghost" onClick={() => { setPage("landing"); setStep(0); setSport(null); setBase(null); setGarment(null); setCart([]); setForm({}); }} style={{ ...T.body, background: "none", border: `0.5px solid ${BORDER}`, borderRadius: 3, padding: "10px 24px", fontSize: 13, color: INK, cursor: "pointer" }}>Start a new design</button>
+          <div style={{ display: "flex", gap: 12, justifyContent: "center" }}>
+            <button className="btn-primary" onClick={() => generatePDF(cart, form)} style={btnPrimary(false)}>
+              Download PDF summary
+            </button>
+            <button className="btn-ghost" onClick={() => { setPage("landing"); setStep(0); setSport(null); setBase(null); setGarment(null); setCart([]); setForm({}); }} style={{ ...T.body, background: "none", border: `0.5px solid ${BORDER}`, borderRadius: 3, padding: "10px 24px", fontSize: 13, color: INK, cursor: "pointer" }}>Start a new design</button>
+          </div>
         </div>
       ) : (
         <>
@@ -635,9 +774,12 @@ export default function App() {
                   disabled={!form.name || !form.email || !form.address || !form.city || !form.postcode || !form.country}
                   style={btnPrimary(!form.name || !form.email || !form.address || !form.city || !form.postcode || !form.country)}
                   onClick={async () => {
-                    const designs = cart.map((item, i) =>
-                      `Design ${i+1}: ${item.garment} — ${item.sport} | Colours: ${Object.entries(item.zones).map(([k,v]) => `${k}: ${v}`).join(', ')}`
-                    ).join('\n');
+                    const designs = cart.map((item, i) => {
+                      const zoneList = Object.entries(item.zones)
+                        .map(([k, v]) => `${k.replace(/([A-Z])/g, ' $1')}: ${v.toUpperCase()}`)
+                        .join(' | ');
+                      return `Design ${i+1}: ${item.garment} — ${item.sport}\nColours: ${zoneList}`;
+                    }).join('\n\n');
                     const body = new URLSearchParams({
                       "form-name": "dyo-quote",
                       name:     form.name || "",
