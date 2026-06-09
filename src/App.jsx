@@ -630,7 +630,37 @@ export default function App() {
                   <Label>Notes or special requests</Label>
                   <textarea style={{ ...inputStyle, height: 80, resize: "vertical" }} value={form.notes || ""} onChange={e => setForm(f => ({ ...f, notes: e.target.value }))} />
                 </div>
-                <button className="btn-primary" onClick={() => setForm(f => ({ ...f, _submitted: true }))} disabled={!form.name || !form.email || !form.address || !form.city || !form.postcode || !form.country} style={btnPrimary(!form.name || !form.email || !form.address || !form.city || !form.postcode || !form.country)}>
+                <button
+                  className="btn-primary"
+                  disabled={!form.name || !form.email || !form.address || !form.city || !form.postcode || !form.country}
+                  style={btnPrimary(!form.name || !form.email || !form.address || !form.city || !form.postcode || !form.country)}
+                  onClick={async () => {
+                    const designs = cart.map((item, i) =>
+                      `Design ${i+1}: ${item.garment} — ${item.sport} | Colours: ${Object.entries(item.zones).map(([k,v]) => `${k}: ${v}`).join(', ')}`
+                    ).join('\n');
+                    const body = new URLSearchParams({
+                      "form-name": "dyo-quote",
+                      name:     form.name || "",
+                      email:    form.email || "",
+                      phone:    form.phone || "",
+                      team:     form.team || "",
+                      qty:      form.qty || "",
+                      address:  form.address || "",
+                      city:     form.city || "",
+                      state:    form.state || "",
+                      postcode: form.postcode || "",
+                      country:  form.country || "",
+                      notes:    form.notes || "",
+                      designs,
+                    });
+                    await fetch("/", {
+                      method: "POST",
+                      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+                      body: body.toString(),
+                    });
+                    setForm(f => ({ ...f, _submitted: true }));
+                  }}
+                >
                   Submit quote request
                 </button>
               </div>
