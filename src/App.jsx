@@ -77,6 +77,21 @@ const ZONES = [
 
 const STEPS = ["Sport", "Base colour", "Garment", "Design", "Cart"];
 
+const DESIGN_TABS = [
+  { key: "designs", label: "Designs" },
+  { key: "colors",  label: "Colors"  },
+  { key: "logos",   label: "Logos"   },
+  { key: "options", label: "Options" },
+];
+
+const PLACEMENTS = ["Chest", "Sleeve", "Front", "Side", "Back"];
+
+const OPTION_GROUPS = [
+  { key: "sleeve", label: "Sleeve length", choices: ["Short", "Long"]      },
+  { key: "fit",    label: "Fit",           choices: ["Athletic", "Relaxed"] },
+  { key: "collar", label: "Collar style",  choices: ["Crew", "V-neck"]      },
+];
+
 // ── Three.js ball ──────────────────────────────────────────────
 function ThreeCanvas({ zones, canvasRef }) {
   const mountRef = useRef();
@@ -313,14 +328,34 @@ export default function App() {
   const [garment, setGarment]   = useState(null);
   const [zones, setZones]       = useState({ body: "#111", sleeves: "#e95428", collar: "#fff", sidePanels: "#e95428", hem: "#111" });
   const [activeZone, setActive] = useState("body");
-  const [logos, setLogos]       = useState({ chest: null, back: null });
+  const [activeTab, setActiveTab] = useState("designs");
+  const [selectedPreset, setSelectedPreset] = useState(null);
+  const [logos, setLogos]       = useState([]); // [{ id, image, placement }]
+  const [uploadTarget, setUploadTarget] = useState(null); // logo id being replaced, or "new"
+  const [options, setOptions]   = useState({ sleeve: "Short", fit: "Athletic", collar: "Crew" });
   const [cart, setCart]         = useState([]);
   const [form, setForm]         = useState({});
-  const chestRef = useRef(), backRef = useRef(), threeCanvasRef = useRef();
+  const threeCanvasRef = useRef(), logoFileRef = useRef();
 
   const setColor       = hex => setZones(z => ({ ...z, [activeZone]: hex }));
-  const addToCart      = () => setCart(c => [...c, { id: Date.now(), sport: SPORTS.find(s => s.id === sport)?.label, garment, zones: { ...zones }, preset: activePreset }]);
+  const addToCart      = () => setCart(c => [...c, { id: Date.now(), sport: SPORTS.find(s => s.id === sport)?.label, garment, zones: { ...zones }, logos: logos.map(l => ({ ...l })), options: { ...options }, preset: selectedPreset }]);
   const removeFromCart = id => setCart(c => c.filter(i => i.id !== id));
+
+  const triggerLogoUpload = target => { setUploadTarget(target); logoFileRef.current.click(); };
+  const handleLogoFile = e => {
+    const fi = e.target.files[0];
+    e.target.value = "";
+    if (!fi) return;
+    const r = new FileReader();
+    r.onload = ev => {
+      if (uploadTarget === "new") {
+        setLogos(ls => [...ls, { id: Date.now(), image: ev.target.result, placement: "Chest" }]);
+      } else {
+        setLogos(ls => ls.map(l => l.id === uploadTarget ? { ...l, image: ev.target.result } : l));
+      }
+    };
+    r.readAsDataURL(fi);
+  };
 
   const generatePDF = useCallback((cartItems, formData) => {
     const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
@@ -567,64 +602,151 @@ export default function App() {
           <ThreeCanvas zones={zones} canvasRef={threeCanvasRef} />
         </div>
 
-        {/* Right — controls */}
-        <div style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
+        {/* Right — tabbed design panel */}
+        <div style={{ display: "flex", flexDirection: "column", border: `0.5px solid ${BORDER}`, borderRadius: 4, background: WHITE, overflow: "hidden" }}>
 
-          {/* Presets + zone pills */}
-          <div>
-            <p style={{ ...T.body, fontSize: 10, letterSpacing: 2, textTransform: "uppercase", color: MUTED, margin: "0 0 10px" }}>Presets</p>
-            <div style={{ display: "flex", gap: 10 }}>
-              {PRESETS.map(p => (
-                <div key={p.name} className="preset-thumb" onClick={() => setZones(p.z(base))} style={{ cursor: "pointer", textAlign: "center" }}>
-                  <div style={{ border: `0.5px solid ${BORDER}`, borderRadius: 3, overflow: "hidden", marginBottom: 4 }}><MiniJersey zones={p.z(base)} /></div>
-                  <span style={{ ...T.body, fontSize: 10, color: MUTED }}>{p.name}</span>
+          {/* Tab bar */}
+          <div style={{ display: "flex", borderBottom: `0.5px solid ${BORDER}`, padding: "0 18px" }}>
+            {DESIGN_TABS.map(t => (
+              <button
+                key={t.key}
+                className="btn-text"
+                onClick={() => setActiveTab(t.key)}
+                style={{
+                  ...T.body, background: "none", border: "none", cursor: "pointer",
+                  fontSize: 11, letterSpacing: 1.5, textTransform: "uppercase",
+                  padding: "16px 0", marginRight: 26,
+                  color: activeTab === t.key ? INK : MUTED,
+                  fontWeight: activeTab === t.key ? 700 : 500,
+                  borderBottom: activeTab === t.key ? `2px solid ${INK}` : "2px solid transparent",
+                }}
+              >
+                {t.label}{t.key === "logos" && logos.length > 0 ? ` (${logos.length})` : ""}
+              </button>
+            ))}
+          </div>
+
+          {/* Tab content */}
+          <div style={{ padding: 18, minHeight: 300 }}>
+
+            {activeTab === "designs" && (
+              <div>
+                <p style={{ ...T.body, fontSize: 10, letterSpacing: 2, textTransform: "uppercase", color: MUTED, margin: "0 0 12px" }}>Start from a preset</p>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12 }}>
+                  {PRESETS.map(p => (
+                    <div key={p.name} className="preset-thumb" onClick={() => { setZones(p.z(base)); setSelectedPreset(p.name); }} style={{ cursor: "pointer", textAlign: "center" }}>
+                      <div style={{ border: `0.5px solid ${selectedPreset === p.name ? INK : BORDER}`, borderRadius: 3, overflow: "hidden", marginBottom: 6, padding: "10px 0", display: "flex", alignItems: "center", justifyContent: "center", background: BG }}>
+                        <MiniJersey zones={p.z(base)} />
+                      </div>
+                      <span style={{ ...T.body, fontSize: 11, color: selectedPreset === p.name ? INK : MUTED }}>{p.name}</span>
+                    </div>
+                  ))}
                 </div>
-              ))}
-            </div>
-            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 12 }}>
-              {ZONES.map(z => (
-                <div key={z.key} className="zone-pill" onClick={() => setActive(z.key)} style={{ ...T.body, fontSize: 11, padding: "4px 10px", borderRadius: 2, cursor: "pointer", border: activeZone === z.key ? `1px solid ${INK}` : `0.5px solid ${BORDER}`, background: activeZone === z.key ? INK : "transparent", color: activeZone === z.key ? WHITE : MUTED, letterSpacing: 0.3 }}>{z.label}</div>
-              ))}
-            </div>
-          </div>
+              </div>
+            )}
 
-          {/* Colour picker */}
-          <div>
-            <p style={{ ...T.body, fontSize: 10, letterSpacing: 2, textTransform: "uppercase", color: MUTED, margin: "0 0 10px" }}>{ZONES.find(z => z.key === activeZone)?.label} colour</p>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-              {PALETTE.map(c => (
-                <div key={c.hex} className="swatch" onClick={() => setColor(c.hex)} style={{ width: 26, height: 26, borderRadius: "50%", background: c.hex, border: zones[activeZone] === c.hex ? `3px solid ${INK}` : `1px solid ${BORDER}`, cursor: "pointer", boxSizing: "border-box", outline: zones[activeZone] === c.hex ? `2px solid ${BG}` : "none", outlineOffset: -5 }} />
-              ))}
-            </div>
-            <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 10 }}>
-              <span style={{ ...T.body, fontSize: 11, color: MUTED }}>Custom</span>
-              <input type="color" value={zones[activeZone]} onChange={e => setColor(e.target.value)} style={{ width: 28, height: 24, border: "none", borderRadius: 3, cursor: "pointer", padding: 0 }} />
-              <span style={{ ...T.body, fontSize: 11, color: MUTED }}>{zones[activeZone]}</span>
-            </div>
-          </div>
+            {activeTab === "colors" && (
+              <div style={{ border: `0.5px solid ${BORDER}`, borderRadius: 4, overflow: "hidden" }}>
+                {ZONES.map(z => {
+                  const open = activeZone === z.key;
+                  return (
+                    <div key={z.key} style={{ borderBottom: `0.5px solid ${BORDER}` }}>
+                      <div
+                        className="zone-pill"
+                        onClick={() => setActive(z.key)}
+                        style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 14px", cursor: "pointer", background: open ? BG2 : WHITE }}
+                      >
+                        <span style={{ ...T.body, fontSize: 12, color: INK, letterSpacing: 0.3 }}>{z.label}</span>
+                        <div style={{ width: 16, height: 16, borderRadius: "50%", background: zones[z.key], border: `0.5px solid ${BORDER}` }} />
+                      </div>
+                      {open && (
+                        <div style={{ padding: "12px 14px 16px" }}>
+                          <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                            {PALETTE.map(c => (
+                              <div key={c.hex} className="swatch" onClick={() => setColor(c.hex)} style={{ width: 26, height: 26, borderRadius: "50%", background: c.hex, border: zones[activeZone] === c.hex ? `3px solid ${INK}` : `1px solid ${BORDER}`, cursor: "pointer", boxSizing: "border-box", outline: zones[activeZone] === c.hex ? `2px solid ${BG}` : "none", outlineOffset: -5 }} />
+                            ))}
+                          </div>
+                          <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 10 }}>
+                            <span style={{ ...T.body, fontSize: 11, color: MUTED }}>Custom</span>
+                            <input type="color" value={zones[activeZone]} onChange={e => setColor(e.target.value)} style={{ width: 28, height: 24, border: "none", borderRadius: 3, cursor: "pointer", padding: 0 }} />
+                            <span style={{ ...T.body, fontSize: 11, color: MUTED }}>{zones[activeZone]}</span>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
 
-          {/* Logos */}
-          <div>
-            <p style={{ ...T.body, fontSize: 10, letterSpacing: 2, textTransform: "uppercase", color: MUTED, margin: "0 0 10px" }}>Logos</p>
-            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              {[["chest", "Chest", chestRef], ["back", "Back", backRef]].map(([zone, lbl, ref]) => (
-                <div key={zone} style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                  <div style={{ width: 32, height: 32, border: `0.5px dashed ${BORDER}`, borderRadius: 3, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0, background: WHITE }}>
-                    {logos[zone] ? <img src={logos[zone]} style={{ width: "100%", height: "100%", objectFit: "contain" }} /> : <span style={{ fontSize: 16, color: BORDER }}>+</span>}
+            {activeTab === "logos" && (
+              <div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  {logos.map(lg => (
+                    <div key={lg.id} style={{ display: "flex", alignItems: "center", gap: 10, border: `0.5px solid ${BORDER}`, borderRadius: 4, padding: 10 }}>
+                      <div style={{ width: 34, height: 34, border: `0.5px dashed ${BORDER}`, borderRadius: 3, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0, background: BG }}>
+                        {lg.image ? <img src={lg.image} style={{ width: "100%", height: "100%", objectFit: "contain" }} /> : <span style={{ fontSize: 16, color: BORDER }}>+</span>}
+                      </div>
+                      <select
+                        value={lg.placement}
+                        onChange={e => setLogos(ls => ls.map(l => l.id === lg.id ? { ...l, placement: e.target.value } : l))}
+                        style={{ ...inputStyle, flex: 1, padding: "6px 8px", fontSize: 12 }}
+                      >
+                        {PLACEMENTS.map(p => <option key={p} value={p}>{p}</option>)}
+                      </select>
+                      <button className="btn-ghost" style={{ ...btnGhost, padding: "4px 10px", fontSize: 11 }} onClick={() => triggerLogoUpload(lg.id)}>{lg.image ? "Change" : "Upload"}</button>
+                      <button className="btn-ghost" style={{ ...btnGhost, padding: "4px 8px", fontSize: 11, color: MUTED }} onClick={() => setLogos(ls => ls.filter(l => l.id !== lg.id))}>✕</button>
+                    </div>
+                  ))}
+                  {logos.length === 0 && (
+                    <p style={{ ...T.body, fontSize: 12, color: MUTED, margin: 0 }}>No logos added yet.</p>
+                  )}
+                  {logos.length < 4 ? (
+                    <button className="btn-ghost" style={{ ...btnGhost, alignSelf: "flex-start" }} onClick={() => triggerLogoUpload("new")}>+ Add logo</button>
+                  ) : (
+                    <span style={{ ...T.body, fontSize: 11, color: MUTED }}>Maximum 4 logos</span>
+                  )}
+                </div>
+                <input ref={logoFileRef} type="file" accept="image/*" style={{ display: "none" }} onChange={handleLogoFile} />
+              </div>
+            )}
+
+            {activeTab === "options" && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+                {OPTION_GROUPS.map(g => (
+                  <div key={g.key}>
+                    <p style={{ ...T.body, fontSize: 10, letterSpacing: 2, textTransform: "uppercase", color: MUTED, margin: "0 0 10px" }}>{g.label}</p>
+                    <div style={{ display: "flex", gap: 6 }}>
+                      {g.choices.map(choice => (
+                        <div
+                          key={choice}
+                          className="zone-pill"
+                          onClick={() => setOptions(o => ({ ...o, [g.key]: choice }))}
+                          style={{
+                            ...T.body, fontSize: 12, padding: "6px 16px", borderRadius: 2, cursor: "pointer",
+                            border: options[g.key] === choice ? `1px solid ${INK}` : `0.5px solid ${BORDER}`,
+                            background: options[g.key] === choice ? INK : "transparent",
+                            color: options[g.key] === choice ? WHITE : MUTED, letterSpacing: 0.3,
+                          }}
+                        >
+                          {choice}
+                        </div>
+                      ))}
+                    </div>
                   </div>
-                  <span style={{ ...T.body, fontSize: 12, color: MUTED, flex: 1 }}>{lbl} logo</span>
-                  <button className="btn-ghost" style={{ ...btnGhost, padding: "4px 10px", fontSize: 11 }} onClick={() => ref.current.click()}>{logos[zone] ? "Change" : "Upload"}</button>
-                  {logos[zone] && <button className="btn-ghost" style={{ ...btnGhost, padding: "4px 8px", fontSize: 11, color: MUTED }} onClick={() => setLogos(l => ({ ...l, [zone]: null }))}>✕</button>}
-                  <input ref={ref} type="file" accept="image/*" style={{ display: "none" }} onChange={e => { const fi = e.target.files[0]; if (!fi) return; const r = new FileReader(); r.onload = ev => setLogos(l => ({ ...l, [zone]: ev.target.result })); r.readAsDataURL(fi); }} />
-                </div>
-              ))}
-            </div>
+                ))}
+                <p style={{ ...T.body, fontSize: 11, color: MUTED, margin: 0, lineHeight: 1.6 }}>More garment options roll out as we add sports and cuts.</p>
+              </div>
+            )}
+
           </div>
 
           {/* Save to cart */}
-          <button className="btn-primary" onClick={() => { addToCart(); setStep(4); }} style={{ ...btnPrimary(false), width: "100%" }}>
-            Save to cart →
-          </button>
+          <div style={{ padding: 18, borderTop: `0.5px solid ${BORDER}` }}>
+            <button className="btn-primary" onClick={() => { addToCart(); setStep(4); }} style={{ ...btnPrimary(false), width: "100%" }}>
+              Save to cart →
+            </button>
+          </div>
 
         </div>
       </div>
