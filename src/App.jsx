@@ -1,20 +1,27 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import * as THREE from "three";
+import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { jsPDF } from "jspdf";
+import heroPolo from "./assets/dynasty-polo-hero.png";
 
 const ORANGE = "#e95428";
-const BG     = "#f5f4f2";
-const BG2    = "#eeecea";
-const INK    = "#111111";
-const MUTED  = "#888880";
-const BORDER = "#dddbd8";
-const WHITE  = "#ffffff";
+const BG     = "#121210"; // page background
+const BG2    = "#1c1c19"; // secondary / active surface
+const INK    = "#f3f1ec"; // primary text + primary button fill
+const MUTED  = "#96938a"; // secondary text
+const BORDER = "#2d2d29"; // subtle dividers
+const WHITE  = "#191916"; // card/panel surfaces + text on light buttons (kept the name so every existing reference below still makes sense — it's the "opposite of INK" role, which happens to be dark now)
 
 const FONT = '"Libre Franklin", sans-serif';
 const T = {
   heading: { fontFamily: FONT, fontWeight: 900, fontStyle: "italic" },
   body:    { fontFamily: FONT, fontWeight: 500, fontStyle: "normal" },
 };
+
+// Sport/garment selection cards are deliberately white (not part of the dark theme) with orange as the selected state
+const CARD_BG      = "#ffffff";
+const CARD_TEXT    = "#161614";
+const CARD_SUBTEXT = "#726f66";
 
 const SPORTS = [
   { id: "rugby-league", label: "Rugby League", sub: "Available now" },
@@ -75,6 +82,24 @@ const ZONES = [
   { key: "hem",        label: "Hem"         },
 ];
 
+// Path to the garment model, served as a static asset from /public/models.
+const JERSEY_GLB_URL = "/models/jersey_test.glb";
+
+// Maps each design zone to the GLB material name(s) that should update when
+// that zone's colour changes. jersey_test.glb currently only has BODY_FRONT,
+// BODY_BACK and COLLAR — sleeves/sidePanels/hem have no mesh yet, so those
+// zones simply have nothing to colour until a fuller model is loaded. Add
+// SLEEVES / SIDE_PANELS / HEM materials to a future GLB (named to match
+// exactly) and they'll pick up colour changes automatically — no code
+// changes needed here.
+const ZONE_TO_MESH_NAMES = {
+  body:       ["BODY_FRONT", "BODY_BACK"],
+  sleeves:    ["SLEEVES"],
+  collar:     ["COLLAR"],
+  sidePanels: ["SIDE_PANELS"],
+  hem:        ["HEM"],
+};
+
 const STEPS = ["Sport", "Base colour", "Garment", "Design", "Cart"];
 
 const DESIGN_TABS = [
@@ -92,10 +117,13 @@ const OPTION_GROUPS = [
   { key: "collar", label: "Collar style",  choices: ["Crew", "V-neck"]      },
 ];
 
-// ── Three.js ball ──────────────────────────────────────────────
+// ── Three.js jersey viewer ─────────────────────────────────────
 function ThreeCanvas({ zones, canvasRef }) {
   const mountRef = useRef();
   const stateRef = useRef({});
+  const zonesRef = useRef(zones);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
 
   useEffect(() => {
     const el = mountRef.current;
@@ -106,49 +134,69 @@ function ThreeCanvas({ zones, canvasRef }) {
     el.appendChild(renderer.domElement);
     const scene = new THREE.Scene();
     const cam = new THREE.PerspectiveCamera(45, w / h, 0.1, 100);
-    cam.position.set(0, 0.5, 3.9);
+    cam.position.set(0, 0, 2.2);
     cam.lookAt(0, 0, 0);
     scene.add(new THREE.AmbientLight(0xffffff, 0.7));
     const d = new THREE.DirectionalLight(0xffffff, 1.1); d.position.set(3, 5, 5); scene.add(d);
     const f = new THREE.DirectionalLight(0xffffff, 0.3); f.position.set(-3, -2, 2); scene.add(f);
-    const geo = new THREE.SphereGeometry(1, 64, 64);
-    geo.applyMatrix4(new THREE.Matrix4().makeScale(1, 0.65, 0.65));
-    const cv = document.createElement("canvas"); cv.width = cv.height = 512;
-    const ctx = cv.getContext("2d");
-    const S = 512;
-    function paint(z) {
-      ctx.fillStyle = z.body; ctx.fillRect(0, 0, S, S);
-      ctx.fillStyle = z.sidePanels;
-      ctx.fillRect(0, 0, S * 0.17, S); ctx.fillRect(S * 0.83, 0, S * 0.17, S);
-      ctx.fillStyle = z.hem; ctx.fillRect(0, S * 0.83, S, S * 0.17);
-      ctx.fillStyle = z.sleeves; ctx.fillRect(0, 0, S, S * 0.17);
-      ctx.fillStyle = z.collar;
-      ctx.beginPath(); ctx.ellipse(S/2, S*0.085, S*0.11, S*0.065, 0, 0, Math.PI*2); ctx.fill();
-      ctx.strokeStyle = "rgba(0,0,0,0.15)"; ctx.lineWidth = 2.5;
-      ctx.beginPath(); ctx.moveTo(0, S/2); ctx.lineTo(S, S/2); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(S/2, 0); ctx.lineTo(S/2, S); ctx.stroke();
-      ctx.strokeStyle = "rgba(255,255,255,0.08)"; ctx.lineWidth = 1.5;
-      [-1, 1].forEach(sg => {
-        ctx.beginPath(); ctx.moveTo(S/2, S/2); ctx.lineTo(S/2 + sg*S*0.35, S*0.14); ctx.stroke();
-        ctx.beginPath(); ctx.moveTo(S/2, S/2); ctx.lineTo(S/2 + sg*S*0.35, S*0.86); ctx.stroke();
+
+    const group = new THREE.Group();
+    scene.add(group);
+    const meshesByZone = {}; // zoneKey -> [mesh, ...]
+
+    function applyZoneColors(z) {
+      Object.keys(z).forEach(zoneKey => {
+        const meshes = meshesByZone[zoneKey] || [];
+        meshes.forEach(mesh => mesh.material.color.set(z[zoneKey]));
       });
-      ctx.fillStyle = "rgba(255,255,255,0.4)";
-      ctx.font = "bold 20px 'Libre Franklin', sans-serif"; ctx.textAlign = "center";
-      ctx.fillText("JERSEY", S/2, S/2 - 10);
-      ctx.font = "12px 'Libre Franklin', sans-serif";
-      ctx.fillText("3D model coming soon", S/2, S/2 + 10);
     }
-    paint(zones);
-    const tex = new THREE.CanvasTexture(cv);
-    tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-    const mat = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.7, metalness: 0.04 });
-    const mesh = new THREE.Mesh(geo, mat);
-    scene.add(mesh);
-    stateRef.current = { renderer, scene, cam, mesh, mat, cv, ctx, tex, paint };
+
+    let disposed = false;
+    const loader = new GLTFLoader();
+    loader.load(
+      JERSEY_GLB_URL,
+      gltf => {
+        if (disposed) return;
+        gltf.scene.traverse(child => {
+          if (!child.isMesh) return;
+          child.material = child.material.clone(); // own instance per mesh, never shared
+          const matName = child.material.name;
+          Object.keys(ZONE_TO_MESH_NAMES).forEach(zoneKey => {
+            if (ZONE_TO_MESH_NAMES[zoneKey].includes(matName)) {
+              if (!meshesByZone[zoneKey]) meshesByZone[zoneKey] = [];
+              meshesByZone[zoneKey].push(child);
+            }
+          });
+        });
+        group.add(gltf.scene);
+
+        // Frame the model: centre it and back the camera off by its size
+        const box = new THREE.Box3().setFromObject(group);
+        const center = box.getCenter(new THREE.Vector3());
+        const size = box.getSize(new THREE.Vector3());
+        group.position.sub(center);
+        const maxDim = Math.max(size.x, size.y, size.z) || 1;
+        const homeCamZ = maxDim * 2.6;
+        cam.position.set(0, 0, homeCamZ);
+        cam.lookAt(0, 0, 0);
+        stateRef.current.homeCamZ = homeCamZ;
+
+        applyZoneColors(zonesRef.current);
+        setLoading(false);
+      },
+      undefined,
+      err => {
+        console.error("Failed to load jersey model:", err);
+        if (!disposed) { setLoadError(true); setLoading(false); }
+      }
+    );
+
+    stateRef.current = { ...stateRef.current, renderer, scene, cam, group, meshesByZone, applyZoneColors };
     if (canvasRef) canvasRef.current = renderer.domElement;
+
     const onWheel = e => {
       e.preventDefault();
-      cam.position.z = Math.max(1.5, Math.min(8, cam.position.z + e.deltaY * 0.005));
+      cam.position.z = Math.max(0.3, Math.min(8, cam.position.z + e.deltaY * 0.005));
     };
     renderer.domElement.addEventListener("wheel", onWheel, { passive: false });
     let drag = false, px = 0, vx = 0;
@@ -159,7 +207,7 @@ function ThreeCanvas({ zones, canvasRef }) {
       if (!drag) return;
       const cx = e.clientX || e.touches?.[0]?.clientX;
       vx = (cx - px) * 0.01; px = cx;
-      mesh.rotation.y += vx;
+      group.rotation.y += vx;
     };
     renderer.domElement.addEventListener("mousedown", dn);
     renderer.domElement.addEventListener("touchstart", dn);
@@ -169,11 +217,12 @@ function ThreeCanvas({ zones, canvasRef }) {
     let raf;
     const tick = () => {
       raf = requestAnimationFrame(tick);
-      if (!drag) { vx *= 0.9; mesh.rotation.y += vx; }
+      if (!drag) { vx *= 0.9; group.rotation.y += vx; }
       renderer.render(scene, cam);
     };
     tick();
     return () => {
+      disposed = true;
       cancelAnimationFrame(raf);
       renderer.domElement.removeEventListener("wheel", onWheel);
       renderer.domElement.removeEventListener("mousedown", dn);
@@ -181,26 +230,42 @@ function ThreeCanvas({ zones, canvasRef }) {
       window.removeEventListener("mouseup", up); window.removeEventListener("touchend", up);
       window.removeEventListener("mousemove", mv); window.removeEventListener("touchmove", mv);
       document.removeEventListener("mouseleave", leave);
+      group.traverse(child => {
+        if (child.isMesh) { child.geometry.dispose(); child.material.dispose(); }
+      });
       renderer.dispose();
       if (el.contains(renderer.domElement)) el.removeChild(renderer.domElement);
     };
-  }, []);
+    // canvasRef is a stable ref object from the parent (identity never
+    // changes), so listing it here doesn't cause re-runs. zones itself is
+    // intentionally NOT a dependency — this effect should only run once;
+    // the async GLTFLoader callback reads zonesRef.current (kept in sync
+    // below) so it always applies the latest colours, not a stale value
+    // captured at mount time.
+  }, [canvasRef]);
 
   useEffect(() => {
-    const { ctx, tex, paint } = stateRef.current;
-    if (!ctx) return; paint(zones); tex.needsUpdate = true;
+    zonesRef.current = zones;
+    const { applyZoneColors } = stateRef.current;
+    if (!applyZoneColors) return;
+    applyZoneColors(zones);
   }, [zones]);
 
   const reset = () => {
-    const { mesh, cam } = stateRef.current;
-    if (!mesh) return;
-    mesh.rotation.set(0, 0, 0);
-    cam.position.set(0, 0.5, 3.9);
+    const { group, cam, homeCamZ } = stateRef.current;
+    if (!group) return;
+    group.rotation.set(0, 0, 0);
+    if (homeCamZ) cam.position.set(0, 0, homeCamZ);
   };
 
   return (
     <div style={{ position: "relative", width: "100%", paddingBottom: "92%" }}>
       <div ref={mountRef} style={{ position: "absolute", inset: 0 }} />
+      {loading && (
+        <div style={{ ...T.body, position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, color: MUTED, letterSpacing: 0.3, pointerEvents: "none" }}>
+          {loadError ? "Couldn't load the 3D model." : "Loading model…"}
+        </div>
+      )}
       <button
         onClick={reset}
         style={{ ...T.body, position: "absolute", bottom: 8, left: 8, fontSize: 10, color: MUTED, background: "none", border: `0.5px solid ${BORDER}`, borderRadius: 3, padding: "3px 8px", cursor: "pointer", letterSpacing: 0.3 }}
@@ -229,7 +294,7 @@ function MiniJersey({ zones }) {
 }
 
 // ── Shared layout shell ────────────────────────────────────────
-function Shell({ children, step: cur, onBack, backLabel, action, actionLabel, actionDisabled, onNavigate }) {
+function Shell({ children, step: cur, onBack, backLabel, action, actionLabel, actionDisabled }) {
   return (
     <div style={{ ...T.body, background: BG, minHeight: "100vh", padding: "2rem 2rem 3rem" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: "2.5rem" }}>
@@ -246,7 +311,7 @@ function Shell({ children, step: cur, onBack, backLabel, action, actionLabel, ac
             : <span />
           }
           {action && (
-            <button className="btn-primary" onClick={action} disabled={actionDisabled} style={{ ...T.body, background: actionDisabled ? "#ccc9c6" : INK, color: WHITE, border: "none", borderRadius: 3, padding: "11px 28px", fontSize: 13, letterSpacing: 0.5, cursor: actionDisabled ? "default" : "pointer" }}>
+            <button className="btn-primary" onClick={action} disabled={actionDisabled} style={{ ...T.body, background: actionDisabled ? BG2 : ORANGE, color: actionDisabled ? MUTED : "#ffffff", border: "none", borderRadius: 3, padding: "11px 28px", fontSize: 13, letterSpacing: 0.5, cursor: actionDisabled ? "default" : "pointer" }}>
               {actionLabel || "Continue →"}
             </button>
           )}
@@ -306,8 +371,8 @@ const inputStyle = {
 
 const btnPrimary = (disabled) => ({
   ...T.body,
-  background: disabled ? "#ccc9c6" : INK,
-  color: WHITE, border: "none", borderRadius: 3,
+  background: disabled ? BG2 : ORANGE,
+  color: disabled ? MUTED : "#ffffff", border: "none", borderRadius: 3,
   padding: "11px 28px", fontSize: 13, letterSpacing: 0.5,
   cursor: disabled ? "default" : "pointer",
 });
@@ -491,25 +556,60 @@ export default function App() {
 
   // ── Landing ──
   if (page === "landing") return (
-    <div style={{ ...T.body, background: BG, minHeight: "100vh", padding: "3rem 2rem", border: "none", outline: "none" }}>
-      <div style={{ maxWidth: 560, margin: "0 auto", textAlign: "center" }}>
-        <Eyebrow>Dynasty Sport</Eyebrow>
-        <h1 style={{ ...T.heading, fontSize: 52, color: INK, lineHeight: 1.05, margin: "0 0 1rem" }}>Design<br />your own kit.</h1>
-        <p style={{ ...T.body, fontSize: 15, color: MUTED, lineHeight: 1.8, maxWidth: 380, margin: "0 auto 2.5rem" }}>
-          Choose your sport, base colour, and garment. Customise every zone, upload your logos, and submit a quote — all in minutes.
-        </p>
-        <div style={{ maxWidth: 340, margin: "0 auto 2.5rem" }}>
-          <img
-            src="https://images.unsplash.com/photo-1558618666-fcd25c85cd64?w=680&q=80"
-            alt="Rugby jerseys"
-            style={{ width: "100%", borderRadius: 3, display: "block", objectFit: "cover", aspectRatio: "4/3" }}
-          />
+    <div style={{ ...T.body, position: "relative", minHeight: "100vh", overflow: "hidden", background: BG }}>
+
+      {/* Subtle glow behind the garment for depth */}
+      <div style={{
+        position: "absolute", top: "8%", right: "-8%", width: "56%", paddingBottom: "56%",
+        background: `radial-gradient(circle, ${ORANGE}26 0%, transparent 70%)`,
+        pointerEvents: "none",
+      }} />
+
+      <div style={{ position: "relative", zIndex: 1, display: "flex", flexDirection: "column", minHeight: "100vh", padding: "2rem", boxSizing: "border-box" }}>
+
+        {/* Top bar */}
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <span style={{ ...T.heading, fontSize: 15, letterSpacing: 3, textTransform: "uppercase", color: INK }}>Dynasty Sport</span>
+          <a
+            href="mailto:marketing@dynastysport.co.nz"
+            className="btn-ghost"
+            style={{ ...T.body, background: "none", border: `0.5px solid ${BORDER}`, borderRadius: 3, padding: "9px 18px", fontSize: 11, letterSpacing: 1.5, textTransform: "uppercase", color: INK, textDecoration: "none", cursor: "pointer" }}
+          >
+            Quote request
+          </a>
         </div>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "1.5rem" }}>
-          <button className="btn-primary" onClick={() => { setPage("steps"); setStep(0); }} style={{ ...T.body, background: INK, color: WHITE, border: "none", borderRadius: 3, padding: "13px 32px", fontSize: 13, letterSpacing: 0.5, cursor: "pointer" }}>
-            Start designing
-          </button>
-          <span style={{ ...T.body, fontSize: 12, color: MUTED }}>Min. 10 garments · Free quote</span>
+
+        {/* Hero body — copy and garment grouped together, centred as a unit */}
+        <div style={{ flex: 1, display: "flex", justifyContent: "center", alignItems: "center" }}>
+          <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: "1.5rem", maxWidth: 980 }}>
+            <div style={{ flex: "0 1 460px", minWidth: 300 }}>
+              <p style={{ ...T.body, fontSize: 11, letterSpacing: 3, textTransform: "uppercase", color: MUTED, margin: "0 0 14px" }}>Design Your Own</p>
+              <h1 style={{ ...T.heading, fontSize: "clamp(36px, 5.5vw, 68px)", color: INK, lineHeight: 1.02, margin: "0 0 1.25rem" }}>
+                The most powerful<br />teamwear designer.
+              </h1>
+              <p style={{ ...T.body, fontSize: 15, color: MUTED, lineHeight: 1.7, maxWidth: 420, margin: "0 0 2.25rem" }}>
+                Choose your sport, base colour, and garment. Customise every zone, upload your logos, and submit a quote — all in minutes.
+              </p>
+              <div style={{ display: "flex", alignItems: "center", gap: "1.5rem", flexWrap: "wrap" }}>
+                <button
+                  className="btn-hero"
+                  onClick={() => { setPage("steps"); setStep(0); }}
+                  style={{ ...T.body, background: ORANGE, color: "#ffffff", border: "none", borderRadius: 3, padding: "15px 36px", fontSize: 13, letterSpacing: 1, textTransform: "uppercase", fontWeight: 700, cursor: "pointer" }}
+                >
+                  Start designing
+                </button>
+                <span style={{ ...T.body, fontSize: 12, color: MUTED }}>Min. 10 garments · Free quote</span>
+              </div>
+            </div>
+
+            <div style={{ flex: "0 1 400px", minWidth: 260, display: "flex", justifyContent: "center", alignItems: "center" }}>
+              <img
+                src={heroPolo}
+                alt="Dynasty Sport custom polo"
+                style={{ width: "100%", maxWidth: 440, height: "auto", display: "block", filter: "drop-shadow(0 30px 60px rgba(0,0,0,0.6))" }}
+              />
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -527,9 +627,9 @@ export default function App() {
           const avail = sp.id === "rugby-league" || sp.id === "rugby-union";
           const sel = sport === sp.id;
           return (
-            <div key={sp.id} className={avail ? "card-select" : ""} onClick={() => avail && setSport(sp.id)} style={{ padding: "1.25rem 1rem", background: sel ? INK : WHITE, cursor: avail ? "pointer" : "default", borderRight: `0.5px solid ${BORDER}`, borderBottom: `0.5px solid ${BORDER}` }}>
-              <div style={{ ...T.body, fontSize: 14, fontWeight: 600, color: sel ? WHITE : avail ? INK : MUTED, marginBottom: 3 }}>{sp.label}</div>
-              <div style={{ ...T.body, fontSize: 11, color: sel ? "#aaa" : avail ? MUTED : "#ccc" }}>{sp.sub}</div>
+            <div key={sp.id} className={avail ? "card-select" : ""} onClick={() => avail && setSport(sp.id)} style={{ padding: "1.25rem 1rem", background: sel ? ORANGE : CARD_BG, cursor: avail ? "pointer" : "default", borderRight: `0.5px solid ${BORDER}`, borderBottom: `0.5px solid ${BORDER}`, opacity: avail ? 1 : 0.45 }}>
+              <div style={{ ...T.body, fontSize: 14, fontWeight: 600, color: sel ? "#ffffff" : CARD_TEXT, marginBottom: 3 }}>{sp.label}</div>
+              <div style={{ ...T.body, fontSize: 11, color: sel ? "rgba(255,255,255,0.85)" : CARD_SUBTEXT }}>{sp.sub}</div>
             </div>
           );
         })}
@@ -544,11 +644,11 @@ export default function App() {
       <Eyebrow>Step 2</Eyebrow>
       <Heading>Select your base colour</Heading>
       <BodyText>This sets the primary colour across your kit. You'll fine-tune individual zones in the designer.</BodyText>
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 12, marginBottom: "1.5rem", justifyContent: "center" }}>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 20, marginBottom: "1.5rem", justifyContent: "center" }}>
         {BASE_COLOURS.map(c => (
           <div key={c.hex} className="swatch" onClick={() => { setBase(c.hex); setZones(PRESETS[0].z(c.hex)); }} style={{ textAlign: "center", cursor: "pointer" }}>
-            <div style={{ width: 44, height: 44, borderRadius: "50%", background: c.hex, border: base === c.hex ? `3px solid ${INK}` : `1px solid ${BORDER}`, boxSizing: "border-box", outline: base === c.hex ? `2px solid ${BG}` : "none", outlineOffset: -5 }} />
-            <div style={{ ...T.body, fontSize: 10, color: MUTED, marginTop: 5 }}>{c.name}</div>
+            <div style={{ width: 88, height: 88, borderRadius: "50%", background: c.hex, border: base === c.hex ? `4px solid ${INK}` : `1px solid ${BORDER}`, boxSizing: "border-box", outline: base === c.hex ? `3px solid ${BG}` : "none", outlineOffset: -7 }} />
+            <div style={{ ...T.body, fontSize: 15, color: INK, marginTop: 8 }}>{c.name}</div>
           </div>
         ))}
       </div>
@@ -568,13 +668,13 @@ export default function App() {
           {list.map(g => {
             const sel = garment === g.id;
             return (
-              <div key={g.id} className={g.available ? "card-select" : ""} onClick={() => g.available && setGarment(g.id)} style={{ padding: "1.25rem", background: sel ? INK : WHITE, cursor: g.available ? "pointer" : "default", display: "flex", alignItems: "center", gap: 14, borderRight: `0.5px solid ${BORDER}`, borderBottom: `0.5px solid ${BORDER}`, opacity: g.available ? 1 : 0.45 }}>
-                <div style={{ width: 44, height: 58, background: sel ? "#222" : BG2, borderRadius: 3, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-                  {g.available ? <MiniJersey zones={zones} /> : <span style={{ fontSize: 18, color: BORDER }}>—</span>}
+              <div key={g.id} className={g.available ? "card-select" : ""} onClick={() => g.available && setGarment(g.id)} style={{ padding: "1.25rem", background: sel ? ORANGE : CARD_BG, cursor: g.available ? "pointer" : "default", display: "flex", alignItems: "center", gap: 14, borderRight: `0.5px solid ${BORDER}`, borderBottom: `0.5px solid ${BORDER}`, opacity: g.available ? 1 : 0.45 }}>
+                <div style={{ width: 44, height: 58, background: "#f4f2ee", border: "0.5px solid #e6e3db", borderRadius: 3, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                  {g.available ? <MiniJersey zones={zones} /> : <span style={{ fontSize: 18, color: CARD_SUBTEXT }}>—</span>}
                 </div>
                 <div>
-                  <div style={{ ...T.body, fontSize: 14, fontWeight: 600, color: sel ? WHITE : g.available ? INK : MUTED }}>{g.label}</div>
-                  <div style={{ ...T.body, fontSize: 11, color: sel ? "#aaa" : MUTED, marginTop: 2 }}>{g.sub}</div>
+                  <div style={{ ...T.body, fontSize: 14, fontWeight: 600, color: sel ? "#ffffff" : CARD_TEXT }}>{g.label}</div>
+                  <div style={{ ...T.body, fontSize: 11, color: sel ? "rgba(255,255,255,0.85)" : CARD_SUBTEXT, marginTop: 2 }}>{g.sub}</div>
                 </div>
               </div>
             );
@@ -631,14 +731,14 @@ export default function App() {
 
             {activeTab === "designs" && (
               <div>
-                <p style={{ ...T.body, fontSize: 10, letterSpacing: 2, textTransform: "uppercase", color: MUTED, margin: "0 0 12px" }}>Start from a preset</p>
+                <p style={{ ...T.body, fontSize: 11, letterSpacing: 2, textTransform: "uppercase", color: INK, margin: "0 0 12px" }}>Start from a preset</p>
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12 }}>
                   {PRESETS.map(p => (
                     <div key={p.name} className="preset-thumb" onClick={() => { setZones(p.z(base)); setSelectedPreset(p.name); }} style={{ cursor: "pointer", textAlign: "center" }}>
                       <div style={{ border: `0.5px solid ${selectedPreset === p.name ? INK : BORDER}`, borderRadius: 3, overflow: "hidden", marginBottom: 6, padding: "10px 0", display: "flex", alignItems: "center", justifyContent: "center", background: BG }}>
                         <MiniJersey zones={p.z(base)} />
                       </div>
-                      <span style={{ ...T.body, fontSize: 11, color: selectedPreset === p.name ? INK : MUTED }}>{p.name}</span>
+                      <span style={{ ...T.body, fontSize: 12, color: INK }}>{p.name}</span>
                     </div>
                   ))}
                 </div>
@@ -656,7 +756,7 @@ export default function App() {
                         onClick={() => setActive(z.key)}
                         style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 14px", cursor: "pointer", background: open ? BG2 : WHITE }}
                       >
-                        <span style={{ ...T.body, fontSize: 12, color: INK, letterSpacing: 0.3 }}>{z.label}</span>
+                        <span style={{ ...T.body, fontSize: 13, color: INK, letterSpacing: 0.3 }}>{z.label}</span>
                         <div style={{ width: 16, height: 16, borderRadius: "50%", background: zones[z.key], border: `0.5px solid ${BORDER}` }} />
                       </div>
                       {open && (
@@ -667,9 +767,9 @@ export default function App() {
                             ))}
                           </div>
                           <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 10 }}>
-                            <span style={{ ...T.body, fontSize: 11, color: MUTED }}>Custom</span>
+                            <span style={{ ...T.body, fontSize: 12, color: INK }}>Custom</span>
                             <input type="color" value={zones[activeZone]} onChange={e => setColor(e.target.value)} style={{ width: 28, height: 24, border: "none", borderRadius: 3, cursor: "pointer", padding: 0 }} />
-                            <span style={{ ...T.body, fontSize: 11, color: MUTED }}>{zones[activeZone]}</span>
+                            <span style={{ ...T.body, fontSize: 12, color: INK }}>{zones[activeZone]}</span>
                           </div>
                         </div>
                       )}
@@ -690,21 +790,21 @@ export default function App() {
                       <select
                         value={lg.placement}
                         onChange={e => setLogos(ls => ls.map(l => l.id === lg.id ? { ...l, placement: e.target.value } : l))}
-                        style={{ ...inputStyle, flex: 1, padding: "6px 8px", fontSize: 12 }}
+                        style={{ ...inputStyle, flex: 1, padding: "6px 8px", fontSize: 13, color: INK }}
                       >
                         {PLACEMENTS.map(p => <option key={p} value={p}>{p}</option>)}
                       </select>
-                      <button className="btn-ghost" style={{ ...btnGhost, padding: "4px 10px", fontSize: 11 }} onClick={() => triggerLogoUpload(lg.id)}>{lg.image ? "Change" : "Upload"}</button>
-                      <button className="btn-ghost" style={{ ...btnGhost, padding: "4px 8px", fontSize: 11, color: MUTED }} onClick={() => setLogos(ls => ls.filter(l => l.id !== lg.id))}>✕</button>
+                      <button className="btn-ghost" style={{ ...btnGhost, padding: "4px 10px", fontSize: 12, color: INK }} onClick={() => triggerLogoUpload(lg.id)}>{lg.image ? "Change" : "Upload"}</button>
+                      <button className="btn-ghost" style={{ ...btnGhost, padding: "4px 8px", fontSize: 12, color: INK }} onClick={() => setLogos(ls => ls.filter(l => l.id !== lg.id))}>✕</button>
                     </div>
                   ))}
                   {logos.length === 0 && (
-                    <p style={{ ...T.body, fontSize: 12, color: MUTED, margin: 0 }}>No logos added yet.</p>
+                    <p style={{ ...T.body, fontSize: 13, color: INK, margin: 0 }}>No logos added yet.</p>
                   )}
                   {logos.length < 4 ? (
-                    <button className="btn-ghost" style={{ ...btnGhost, alignSelf: "flex-start" }} onClick={() => triggerLogoUpload("new")}>+ Add logo</button>
+                    <button className="btn-ghost" style={{ ...btnGhost, alignSelf: "flex-start", color: INK }} onClick={() => triggerLogoUpload("new")}>+ Add logo</button>
                   ) : (
-                    <span style={{ ...T.body, fontSize: 11, color: MUTED }}>Maximum 4 logos</span>
+                    <span style={{ ...T.body, fontSize: 12, color: INK }}>Maximum 4 logos</span>
                   )}
                 </div>
                 <input ref={logoFileRef} type="file" accept="image/*" style={{ display: "none" }} onChange={handleLogoFile} />
@@ -715,7 +815,7 @@ export default function App() {
               <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
                 {OPTION_GROUPS.map(g => (
                   <div key={g.key}>
-                    <p style={{ ...T.body, fontSize: 10, letterSpacing: 2, textTransform: "uppercase", color: MUTED, margin: "0 0 10px" }}>{g.label}</p>
+                    <p style={{ ...T.body, fontSize: 11, letterSpacing: 2, textTransform: "uppercase", color: INK, margin: "0 0 10px" }}>{g.label}</p>
                     <div style={{ display: "flex", gap: 6 }}>
                       {g.choices.map(choice => (
                         <div
@@ -723,10 +823,10 @@ export default function App() {
                           className="zone-pill"
                           onClick={() => setOptions(o => ({ ...o, [g.key]: choice }))}
                           style={{
-                            ...T.body, fontSize: 12, padding: "6px 16px", borderRadius: 2, cursor: "pointer",
+                            ...T.body, fontSize: 13, padding: "6px 16px", borderRadius: 2, cursor: "pointer",
                             border: options[g.key] === choice ? `1px solid ${INK}` : `0.5px solid ${BORDER}`,
                             background: options[g.key] === choice ? INK : "transparent",
-                            color: options[g.key] === choice ? WHITE : MUTED, letterSpacing: 0.3,
+                            color: options[g.key] === choice ? WHITE : INK, letterSpacing: 0.3,
                           }}
                         >
                           {choice}
@@ -735,7 +835,7 @@ export default function App() {
                     </div>
                   </div>
                 ))}
-                <p style={{ ...T.body, fontSize: 11, color: MUTED, margin: 0, lineHeight: 1.6 }}>More garment options roll out as we add sports and cuts.</p>
+                <p style={{ ...T.body, fontSize: 12, color: INK, margin: 0, lineHeight: 1.6 }}>More garment options roll out as we add sports and cuts.</p>
               </div>
             )}
 
