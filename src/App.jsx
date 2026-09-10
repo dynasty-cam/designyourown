@@ -67,38 +67,34 @@ const GARMENTS = {
 };
 
 const PRESETS = [
-  { name: "Block",   z: b => ({ body: b,      sleeves: b,      collar: ORANGE,  sidePanels: b,      hem: ORANGE }) },
-  { name: "Raglan",  z: b => ({ body: b,      sleeves: "#111", collar: "#111",  sidePanels: b,      hem: "#111" }) },
-  { name: "Hoops",   z: b => ({ body: b,      sleeves: WHITE,  collar: "#111",  sidePanels: b,      hem: WHITE  }) },
-  { name: "Inverse", z: b => ({ body: WHITE,  sleeves: b,      collar: "#111",  sidePanels: "#111", hem: b      }) },
-  { name: "Dynasty", z: b => ({ body: "#111", sleeves: b,      collar: WHITE,   sidePanels: b,      hem: "#111" }) },
+  { name: "Block",   z: (b, ids) => zoneMap(ids, id => id === "COLLAR" ? ORANGE : b) },
+  { name: "Raglan",  z: (b, ids) => zoneMap(ids, id => id === "BASE" || id.startsWith("DESIGN") ? b : "#111") },
+  { name: "Hoops",   z: (b, ids) => zoneMap(ids, id => id === "COLLAR" ? "#111" : id.startsWith("DESIGN") ? WHITE : b) },
+  { name: "Inverse", z: (b, ids) => zoneMap(ids, id => id === "BASE" ? WHITE : id === "COLLAR" ? "#111" : b) },
+  { name: "Dynasty", z: (b, ids) => zoneMap(ids, id => id === "COLLAR" ? WHITE : id.startsWith("DESIGN") ? WHITE : "#111") },
 ];
+function zoneMap(ids, fn) {
+  return Object.fromEntries(ids.map(id => [id, fn(id)]));
+}
 
-const ZONES = [
-  { key: "body",       label: "Body"        },
-  { key: "sleeves",    label: "Sleeves"     },
-  { key: "collar",     label: "Collar"      },
-  { key: "sidePanels", label: "Side panels" },
-  { key: "hem",        label: "Hem"         },
-];
+// Turns a raw zone id into a friendly label: BASE -> "Base", DESIGN_1 -> "Design 1"
+function friendlyZoneLabel(id) {
+  return id.toLowerCase().split("_").map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+}
 
-// Path to the garment model, served as a static asset from /public/models.
+// Zones are no longer a fixed list — ThreeCanvas discovers them at runtime
+// from the garment's SVG (see discoverZones) and reports the list back up
+// via onZonesDiscovered, so this file has no hardcoded zone names at all.
+
+// Static garment assets, served from /public/models.
 const JERSEY_GLB_URL = "/models/jersey_test.glb";
+const JERSEY_SVG_URL = "/models/JERSEY_TEST.svg";
 
-// Maps each design zone to the GLB material name(s) that should update when
-// that zone's colour changes. jersey_test.glb currently only has BODY_FRONT,
-// BODY_BACK and COLLAR — sleeves/sidePanels/hem have no mesh yet, so those
-// zones simply have nothing to colour until a fuller model is loaded. Add
-// SLEEVES / SIDE_PANELS / HEM materials to a future GLB (named to match
-// exactly) and they'll pick up colour changes automatically — no code
-// changes needed here.
-const ZONE_TO_MESH_NAMES = {
-  body:       ["BODY_FRONT", "BODY_BACK"],
-  sleeves:    ["SLEEVES"],
-  collar:     ["COLLAR"],
-  sidePanels: ["SIDE_PANELS"],
-  hem:        ["HEM"],
-};
+// The GLB's INSIDE material is the reverse face of the same fabric as BASE
+// (confirmed by matching UV ranges) but is deliberately excluded from the
+// colour system — it stays a fixed neutral regardless of what BASE is set to.
+const INSIDE_MATERIAL_NAME = "INSIDE";
+const INSIDE_NEUTRAL_COLOR = "#1a1a1a";
 
 const STEPS = ["Sport", "Base colour", "Garment", "Design", "Cart"];
 
@@ -118,10 +114,59 @@ const OPTION_GROUPS = [
 ];
 
 // ── Three.js jersey viewer ─────────────────────────────────────
-function ThreeCanvas({ zones, canvasRef }) {
+// Zones now come from the SVG at runtime, not a hardcoded list. A "zone" is
+// any element whose id ends in "_COLOUR"; its closest ancestor <g id="...">
+// is the zone itself. If that group sits inside another zone group (like
+// DESIGN_1 nested inside BASE), it's a design element that gets painted
+// onto its parent's canvas texture rather than getting its own mesh.
+const CANVAS_SIZE = 1024;
+
+function discoverZones(svgRoot) {
+  const zoneMap = new Map(); // id -> { id, groupEl, shapeEl, parentId }
+  svgRoot.querySelectorAll('[id$="_COLOUR"]').forEach(shapeEl => {
+    const groupEl = shapeEl.closest("g[id]");
+    if (!groupEl || zoneMap.has(groupEl.id)) return;
+    zoneMap.set(groupEl.id, { id: groupEl.id, groupEl, shapeEl, parentId: null });
+  });
+  zoneMap.forEach(zone => {
+    let el = zone.groupEl.parentElement;
+    while (el && el.tagName !== "svg") {
+      if (el.id && zoneMap.has(el.id)) { zone.parentId = el.id; break; }
+      el = el.parentElement;
+    }
+  });
+  return zoneMap;
+}
+
+// Fills a zone's shape (rect or path) onto a canvas, scaled so refBBox (the
+// top-level zone's own bounding box) maps exactly onto the full canvas —
+// this is what lines a nested design element up correctly against its parent.
+function paintShapeOnCanvas(ctx, shapeEl, refBBox, hex) {
+  const sx = CANVAS_SIZE / refBBox.width;
+  const sy = CANVAS_SIZE / refBBox.height;
+  ctx.save();
+  ctx.setTransform(sx, 0, 0, sy, -refBBox.x * sx, -refBBox.y * sy);
+  ctx.fillStyle = hex;
+  if (shapeEl.tagName.toLowerCase() === "rect") {
+    ctx.fillRect(
+      parseFloat(shapeEl.getAttribute("x") || 0),
+      parseFloat(shapeEl.getAttribute("y") || 0),
+      parseFloat(shapeEl.getAttribute("width") || 0),
+      parseFloat(shapeEl.getAttribute("height") || 0)
+    );
+  } else {
+    const d = shapeEl.getAttribute("d");
+    if (d) ctx.fill(new Path2D(d));
+  }
+  ctx.restore();
+}
+
+function ThreeCanvas({ zones, canvasRef, onZonesDiscovered }) {
   const mountRef = useRef();
+  const svgHostRef = useRef();
   const stateRef = useRef({});
   const zonesRef = useRef(zones);
+  const onZonesDiscoveredRef = useRef(onZonesDiscovered);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
 
@@ -142,33 +187,86 @@ function ThreeCanvas({ zones, canvasRef }) {
 
     const group = new THREE.Group();
     scene.add(group);
-    const meshesByZone = {}; // zoneKey -> [mesh, ...]
 
-    function applyZoneColors(z) {
-      Object.keys(z).forEach(zoneKey => {
-        const meshes = meshesByZone[zoneKey] || [];
-        meshes.forEach(mesh => mesh.material.color.set(z[zoneKey]));
+    const meshesByZone = {};   // topZoneId -> [mesh, ...]
+    const zoneCanvases = {};   // topZoneId -> { canvas, ctx, texture }
+    let zoneMap = new Map();   // id -> { id, groupEl, shapeEl, parentId }
+
+    function getOrCreateCanvas(zoneId) {
+      if (!zoneCanvases[zoneId]) {
+        const canvas = document.createElement("canvas");
+        canvas.width = canvas.height = CANVAS_SIZE;
+        const texture = new THREE.CanvasTexture(canvas);
+        texture.colorSpace = THREE.SRGBColorSpace;
+        zoneCanvases[zoneId] = { canvas, ctx: canvas.getContext("2d"), texture };
+      }
+      return zoneCanvases[zoneId];
+    }
+
+    function redrawZone(topZoneId) {
+      const zc = zoneCanvases[topZoneId];
+      const topZone = zoneMap.get(topZoneId);
+      if (!zc || !topZone) return;
+      const refBBox = topZone.shapeEl.getBBox();
+      zc.ctx.setTransform(1, 0, 0, 1, 0, 0);
+      zc.ctx.clearRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+      paintShapeOnCanvas(zc.ctx, topZone.shapeEl, refBBox, zonesRef.current[topZoneId] || "#cccccc");
+      zoneMap.forEach(z => {
+        if (z.parentId === topZoneId) {
+          const hex = zonesRef.current[z.id];
+          if (hex) paintShapeOnCanvas(zc.ctx, z.shapeEl, refBBox, hex);
+        }
       });
+      zc.texture.needsUpdate = true;
+    }
+
+    function redrawAllZones() {
+      zoneMap.forEach(z => { if (!z.parentId && zoneCanvases[z.id]) redrawZone(z.id); });
     }
 
     let disposed = false;
-    const loader = new GLTFLoader();
-    loader.load(
-      JERSEY_GLB_URL,
-      gltf => {
+
+    (async () => {
+      try {
+        const loader = new GLTFLoader();
+        const [gltf, svgText] = await Promise.all([
+          new Promise((resolve, reject) => loader.load(JERSEY_GLB_URL, resolve, undefined, reject)),
+          fetch(JERSEY_SVG_URL).then(r => {
+            if (!r.ok) throw new Error(`Couldn't fetch SVG (${r.status})`);
+            return r.text();
+          }),
+        ]);
         if (disposed) return;
+
+        // Parsed off-screen (visibility:hidden, not display:none — it needs
+        // real layout for getBBox() to work) so zone shapes are real,
+        // measurable DOM elements rather than inert text.
+        svgHostRef.current.innerHTML = svgText;
+        const svgRoot = svgHostRef.current.querySelector("svg");
+        zoneMap = discoverZones(svgRoot);
+        onZonesDiscoveredRef.current?.(Array.from(zoneMap.keys()));
+
         gltf.scene.traverse(child => {
           if (!child.isMesh) return;
           child.material = child.material.clone(); // own instance per mesh, never shared
           const matName = child.material.name;
-          Object.keys(ZONE_TO_MESH_NAMES).forEach(zoneKey => {
-            if (ZONE_TO_MESH_NAMES[zoneKey].includes(matName)) {
-              if (!meshesByZone[zoneKey]) meshesByZone[zoneKey] = [];
-              meshesByZone[zoneKey].push(child);
-            }
-          });
+
+          if (matName === INSIDE_MATERIAL_NAME) {
+            child.material.color.set(INSIDE_NEUTRAL_COLOR);
+            return;
+          }
+          const zone = zoneMap.get(matName);
+          if (zone && !zone.parentId) {
+            const { texture } = getOrCreateCanvas(matName);
+            child.material.map = texture;
+            child.material.color.set(0xffffff); // map carries the colour — keep this neutral so it doesn't tint
+            child.material.needsUpdate = true;
+            if (!meshesByZone[matName]) meshesByZone[matName] = [];
+            meshesByZone[matName].push(child);
+          }
         });
         group.add(gltf.scene);
+        redrawAllZones();
 
         // Frame the model: centre it and back the camera off by its size
         const box = new THREE.Box3().setFromObject(group);
@@ -181,17 +279,14 @@ function ThreeCanvas({ zones, canvasRef }) {
         cam.lookAt(0, 0, 0);
         stateRef.current.homeCamZ = homeCamZ;
 
-        applyZoneColors(zonesRef.current);
         setLoading(false);
-      },
-      undefined,
-      err => {
-        console.error("Failed to load jersey model:", err);
+      } catch (err) {
+        console.error("Failed to load jersey model or SVG:", err);
         if (!disposed) { setLoadError(true); setLoading(false); }
       }
-    );
+    })();
 
-    stateRef.current = { ...stateRef.current, renderer, scene, cam, group, meshesByZone, applyZoneColors };
+    stateRef.current = { ...stateRef.current, renderer, scene, cam, group, redrawAllZones };
     if (canvasRef) canvasRef.current = renderer.domElement;
 
     const onWheel = e => {
@@ -231,24 +326,31 @@ function ThreeCanvas({ zones, canvasRef }) {
       window.removeEventListener("mousemove", mv); window.removeEventListener("touchmove", mv);
       document.removeEventListener("mouseleave", leave);
       group.traverse(child => {
-        if (child.isMesh) { child.geometry.dispose(); child.material.dispose(); }
+        if (child.isMesh) {
+          child.geometry.dispose();
+          if (child.material.map) child.material.map.dispose();
+          child.material.dispose();
+        }
       });
+      Object.values(zoneCanvases).forEach(zc => zc.texture.dispose());
       renderer.dispose();
       if (el.contains(renderer.domElement)) el.removeChild(renderer.domElement);
     };
-    // canvasRef is a stable ref object from the parent (identity never
-    // changes), so listing it here doesn't cause re-runs. zones itself is
-    // intentionally NOT a dependency — this effect should only run once;
-    // the async GLTFLoader callback reads zonesRef.current (kept in sync
-    // below) so it always applies the latest colours, not a stale value
-    // captured at mount time.
+    // canvasRef is a stable ref from the parent; onZonesDiscovered is read
+    // via a ref (kept in sync just below) so neither needs to be a
+    // dependency here. zones itself is intentionally not a dependency —
+    // this effect should only run once; the zones-driven effect below
+    // handles every colour update via zonesRef + redrawAllZones.
   }, [canvasRef]);
 
   useEffect(() => {
+    onZonesDiscoveredRef.current = onZonesDiscovered;
+  }, [onZonesDiscovered]);
+
+  useEffect(() => {
     zonesRef.current = zones;
-    const { applyZoneColors } = stateRef.current;
-    if (!applyZoneColors) return;
-    applyZoneColors(zones);
+    const { redrawAllZones } = stateRef.current;
+    if (redrawAllZones) redrawAllZones();
   }, [zones]);
 
   const reset = () => {
@@ -261,6 +363,7 @@ function ThreeCanvas({ zones, canvasRef }) {
   return (
     <div style={{ position: "relative", width: "100%", paddingBottom: "92%" }}>
       <div ref={mountRef} style={{ position: "absolute", inset: 0 }} />
+      <div ref={svgHostRef} style={{ position: "absolute", width: 0, height: 0, overflow: "hidden", visibility: "hidden", pointerEvents: "none" }} />
       {loading && (
         <div style={{ ...T.body, position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, color: MUTED, letterSpacing: 0.3, pointerEvents: "none" }}>
           {loadError ? "Couldn't load the 3D model." : "Loading model…"}
@@ -277,19 +380,21 @@ function ThreeCanvas({ zones, canvasRef }) {
   );
 }
 
-// ── Mini jersey SVG ────────────────────────────────────────────
+// ── Mini jersey preview ────────────────────────────────────────
+// Placeholder pending a proper mini-render of the real garment SVG — zones
+// are now dynamic (driven by whatever's in the SVG), so a shape hardcoded to
+// the old fixed 5-zone taxonomy no longer applies. This just shows one
+// swatch per zone so cart/preset previews stay honest without guessing at a
+// shape that doesn't match the actual garment.
 function MiniJersey({ zones }) {
-  const { body, sleeves, collar, sidePanels, hem } = zones;
+  const entries = Object.entries(zones || {});
   return (
-    <svg viewBox="0 0 36 48" style={{ width: 36, height: 48, flexShrink: 0 }}>
-      <rect width="36" height="48" fill={body} />
-      <polygon points="0,0 10,0 10,22 0,18" fill={sleeves} />
-      <polygon points="36,0 26,0 26,22 36,18" fill={sleeves} />
-      <rect x="0" y="0" width="5" height="48" fill={sidePanels} />
-      <rect x="31" y="0" width="5" height="48" fill={sidePanels} />
-      <rect x="0" y="42" width="36" height="6" fill={hem} />
-      <path d="M13,0 Q18,5 23,0 L22,6 Q18,2 14,6 Z" fill={collar} />
-    </svg>
+    <div style={{ display: "flex", width: 36, height: 48, borderRadius: 2, overflow: "hidden", flexShrink: 0, border: `0.5px solid ${BORDER}` }}>
+      {entries.length === 0
+        ? <div style={{ flex: 1, background: BG2 }} />
+        : entries.map(([id, hex]) => <div key={id} style={{ flex: 1, background: hex }} />)
+      }
+    </div>
   );
 }
 
@@ -391,8 +496,9 @@ export default function App() {
   const [sport, setSport]       = useState(null);
   const [base, setBase]         = useState(null);
   const [garment, setGarment]   = useState(null);
-  const [zones, setZones]       = useState({ body: "#111", sleeves: "#e95428", collar: "#fff", sidePanels: "#e95428", hem: "#111" });
-  const [activeZone, setActive] = useState("body");
+  const [zones, setZones]       = useState({});
+  const [zoneList, setZoneList] = useState([]); // populated once ThreeCanvas parses the SVG
+  const [activeZone, setActive] = useState(null);
   const [activeTab, setActiveTab] = useState("designs");
   const [selectedPreset, setSelectedPreset] = useState(null);
   const [logos, setLogos]       = useState([]); // [{ id, image, placement }]
@@ -403,6 +509,18 @@ export default function App() {
   const threeCanvasRef = useRef(), logoFileRef = useRef();
 
   const setColor       = hex => setZones(z => ({ ...z, [activeZone]: hex }));
+  const handleZonesDiscovered = zoneIds => {
+    setZoneList(zoneIds);
+    setZones(prev => {
+      const next = { ...prev };
+      let changed = false;
+      zoneIds.forEach(id => {
+        if (!(id in next)) { next[id] = id === "COLLAR" ? "#ffffff" : (base || "#1c3f94"); changed = true; }
+      });
+      return changed ? next : prev;
+    });
+    setActive(prev => (prev && zoneIds.includes(prev)) ? prev : zoneIds[0]);
+  };
   const addToCart      = () => setCart(c => [...c, { id: Date.now(), sport: SPORTS.find(s => s.id === sport)?.label, garment, zones: { ...zones }, logos: logos.map(l => ({ ...l })), options: { ...options }, preset: selectedPreset }]);
   const removeFromCart = id => setCart(c => c.filter(i => i.id !== id));
 
@@ -646,7 +764,7 @@ export default function App() {
       <BodyText>This sets the primary colour across your kit. You'll fine-tune individual zones in the designer.</BodyText>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 20, marginBottom: "1.5rem", justifyContent: "center" }}>
         {BASE_COLOURS.map(c => (
-          <div key={c.hex} className="swatch" onClick={() => { setBase(c.hex); setZones(PRESETS[0].z(c.hex)); }} style={{ textAlign: "center", cursor: "pointer" }}>
+          <div key={c.hex} className="swatch" onClick={() => { setBase(c.hex); setZones(zoneList.length ? PRESETS[0].z(c.hex, zoneList) : {}); }} style={{ textAlign: "center", cursor: "pointer" }}>
             <div style={{ width: 88, height: 88, borderRadius: "50%", background: c.hex, border: base === c.hex ? `4px solid ${INK}` : `1px solid ${BORDER}`, boxSizing: "border-box", outline: base === c.hex ? `3px solid ${BG}` : "none", outlineOffset: -7 }} />
             <div style={{ ...T.body, fontSize: 15, color: INK, marginTop: 8 }}>{c.name}</div>
           </div>
@@ -699,7 +817,7 @@ export default function App() {
 
         {/* Left — 3D viewer */}
         <div>
-          <ThreeCanvas zones={zones} canvasRef={threeCanvasRef} />
+          <ThreeCanvas zones={zones} canvasRef={threeCanvasRef} onZonesDiscovered={handleZonesDiscovered} />
         </div>
 
         {/* Right — tabbed design panel */}
@@ -732,32 +850,39 @@ export default function App() {
             {activeTab === "designs" && (
               <div>
                 <p style={{ ...T.body, fontSize: 11, letterSpacing: 2, textTransform: "uppercase", color: INK, margin: "0 0 12px" }}>Start from a preset</p>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12 }}>
-                  {PRESETS.map(p => (
-                    <div key={p.name} className="preset-thumb" onClick={() => { setZones(p.z(base)); setSelectedPreset(p.name); }} style={{ cursor: "pointer", textAlign: "center" }}>
-                      <div style={{ border: `0.5px solid ${selectedPreset === p.name ? INK : BORDER}`, borderRadius: 3, overflow: "hidden", marginBottom: 6, padding: "10px 0", display: "flex", alignItems: "center", justifyContent: "center", background: BG }}>
-                        <MiniJersey zones={p.z(base)} />
+                {zoneList.length === 0 ? (
+                  <p style={{ ...T.body, fontSize: 12, color: MUTED }}>Loading zones from the garment…</p>
+                ) : (
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12 }}>
+                    {PRESETS.map(p => (
+                      <div key={p.name} className="preset-thumb" onClick={() => { setZones(p.z(base, zoneList)); setSelectedPreset(p.name); }} style={{ cursor: "pointer", textAlign: "center" }}>
+                        <div style={{ border: `0.5px solid ${selectedPreset === p.name ? INK : BORDER}`, borderRadius: 3, overflow: "hidden", marginBottom: 6, padding: "10px 0", display: "flex", alignItems: "center", justifyContent: "center", background: BG }}>
+                          <MiniJersey zones={p.z(base, zoneList)} />
+                        </div>
+                        <span style={{ ...T.body, fontSize: 12, color: INK }}>{p.name}</span>
                       </div>
-                      <span style={{ ...T.body, fontSize: 12, color: INK }}>{p.name}</span>
-                    </div>
-                  ))}
-                </div>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
 
             {activeTab === "colors" && (
               <div style={{ border: `0.5px solid ${BORDER}`, borderRadius: 4, overflow: "hidden" }}>
-                {ZONES.map(z => {
-                  const open = activeZone === z.key;
+                {zoneList.length === 0 && (
+                  <p style={{ ...T.body, fontSize: 12, color: MUTED, padding: "12px 14px" }}>Loading zones from the garment…</p>
+                )}
+                {zoneList.map(id => {
+                  const open = activeZone === id;
                   return (
-                    <div key={z.key} style={{ borderBottom: `0.5px solid ${BORDER}` }}>
+                    <div key={id} style={{ borderBottom: `0.5px solid ${BORDER}` }}>
                       <div
                         className="zone-pill"
-                        onClick={() => setActive(z.key)}
+                        onClick={() => setActive(id)}
                         style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 14px", cursor: "pointer", background: open ? BG2 : WHITE }}
                       >
-                        <span style={{ ...T.body, fontSize: 13, color: INK, letterSpacing: 0.3 }}>{z.label}</span>
-                        <div style={{ width: 16, height: 16, borderRadius: "50%", background: zones[z.key], border: `0.5px solid ${BORDER}` }} />
+                        <span style={{ ...T.body, fontSize: 13, color: INK, letterSpacing: 0.3 }}>{friendlyZoneLabel(id)}</span>
+                        <div style={{ width: 16, height: 16, borderRadius: "50%", background: zones[id], border: `0.5px solid ${BORDER}` }} />
                       </div>
                       {open && (
                         <div style={{ padding: "12px 14px 16px" }}>
@@ -768,7 +893,7 @@ export default function App() {
                           </div>
                           <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 10 }}>
                             <span style={{ ...T.body, fontSize: 12, color: INK }}>Custom</span>
-                            <input type="color" value={zones[activeZone]} onChange={e => setColor(e.target.value)} style={{ width: 28, height: 24, border: "none", borderRadius: 3, cursor: "pointer", padding: 0 }} />
+                            <input type="color" value={zones[activeZone] || "#000000"} onChange={e => setColor(e.target.value)} style={{ width: 28, height: 24, border: "none", borderRadius: 3, cursor: "pointer", padding: 0 }} />
                             <span style={{ ...T.body, fontSize: 12, color: INK }}>{zones[activeZone]}</span>
                           </div>
                         </div>
